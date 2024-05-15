@@ -1,3 +1,13 @@
+Metadata-Version: 2.1
+Name: stickydata
+Version: 0.1
+Summary: package for correcting partitioning delays using deconvolution
+Home-page: https://github.com/dpagonis/stickydata
+Author: Demetrios Pagonis
+Author-email: demetriospagonis@weber.edu
+Description-Content-Type: text/markdown
+License-File: LICENSE
+
 # stickydata
 A package for correcting partitioning delays using deconvolution
 
