@@ -79,10 +79,11 @@ def Deconvolve_SingleExp(wX, wY, Tau, NIter = 0):
         # Update correlation coefficient
         LastR2 = R2
         R2 = np.corrcoef(wConv, wY)[0, 1] ** 2
-        
+        deltaR2 = (abs(R2 - LastR2) / LastR2) * 100 
         # Check for stopping criteria
-        if ((abs(R2 - LastR2) / LastR2) * 100 > 0.1) or (ForceIterations == 1):
+        if (deltaR2 > 0.1) or (ForceIterations == 1):
             wDest[:] = wDest - wError
+            print(f"Iteration {ii}: %R2 change={deltaR2:.3f}")
         else:
             print(f"Stopped deconv at N={ii}, %R2 change={(abs(R2 - LastR2) / LastR2) * 100:.3f}")
             break
@@ -112,6 +113,7 @@ def Deconvolve_DblExp(wX, wY, Tau1, A1, Tau2, A2, NIter = 0):
     NIter = 100 if NIter == 0 else NIter
     
     time_max = int(10 * max(Tau1, Tau2)) # Calculate the desired duration
+    wX = np.array([x.timestamp()-wX[0].timestamp() for x in wX])
     N = np.argmin(np.abs(wX - time_max))
 
     # make X data for kernel
@@ -170,13 +172,13 @@ def Deconvolve_DblExp_VariableIRF(df, directory, base_name, NIter=0, increasing_
         'IRF_key' : 1/0 flag where 1 indicates the time periods to be used for fitting IRF
         Optional:
             'IRF_data' : for cases where IRF is fitted to a different time series than 'signal' (e.g. isotopically labeled calibrant)
-            'bg_key' : 1/0 flag indicating periods where 
+            'bg_key' : 1/0 flag indicating measurements of instrument background 
     directory (str): Directory path where output files will be saved
     basename (str): name to use for writing output data. existing data will be overwritten
     
     Optional Parameters:
     NIter (int): Number of iterations for the deconvolution process. default iterates until solution stabilizes
-    increasing_IRF (bool): Flag to determine if specific integration intervals are used, Default False
+    increasing_IRF (bool): Flag for whether to fit in increasing IRF (True) or a decreasing IRF (False, Default behavior)
     make_figures (bool): Flag to make figures or not
 
     Returns:
@@ -196,8 +198,8 @@ def Deconvolve_DblExp_VariableIRF(df, directory, base_name, NIter=0, increasing_
     # Drop rows where there are NaN values
     data = df.dropna(subset=['signal', 'IRF_data'])
 
-    # Convert time values to Unix timestamps
-    wX = [pd.Timestamp(dt64).timestamp() for dt64 in data['time'].values] 
+    # Convert time values to timestamps
+    wX = scrub_time(data['time'].values)
     wY = data['signal'].values
 
     # Fit the IRF before deconvolution
@@ -206,7 +208,7 @@ def Deconvolve_DblExp_VariableIRF(df, directory, base_name, NIter=0, increasing_
     wDest = HV_Deconvolve(df, df_IRF, directory, base_name, NIter)
 
     if make_figures:
-        HV_PlotFigures(wX, wY, wDest, directory, base_name)
+        HV_PlotFigures(data['time'], wY, wDest, directory, base_name)
 
     # Calculate the integrals
     integral_wY = trapezoid(wY,wX)
@@ -340,7 +342,7 @@ def FitIRFs_DblExp(df, directory, base_name, increasing_IRF, make_figures):
 
     # Extract necessary data from the dataframe
     x_values_datetime = df['time'].values 
-    x_values_numeric = np.array([(date - np.datetime64('1970-01-01T00:00:00')).astype('timedelta64[s]').astype(float) for date in x_values_datetime])
+    x_values_numeric = scrub_time(x_values_datetime)
     y_values = df['IRF_data'].values
     IRF_key = df['IRF_key'].values
 
@@ -365,15 +367,17 @@ def FitIRFs_DblExp(df, directory, base_name, increasing_IRF, make_figures):
 
         fig, axes = plt.subplots(num_rows, num_columns, figsize=(12, 2*num_rows), squeeze=False) 
 
-    fit_info_list = [['time', 'A1', 'Tau1', 'A2', 'Tau2']]
+    fit_info_list = [['time', 'A1', 'A1_stdev', 'Tau1', 'Tau1_stdev', 'A2', 'A2_stdev', 'Tau2', 'Tau2_stdev']]
 
     for i, (start_index, end_index) in enumerate(zip(starts, ends)):
         
         
         x_subset_numeric = x_values_numeric[start_index:end_index]
         y_subset = y_values[start_index:end_index]
-        fitted_params, _, _, fitY = DP_FitDblExp(y_subset, x_subset_numeric, increasing_IRF) 
+        fitted_params, fit_covariance, _, fitY = DP_FitDblExp(y_subset, x_subset_numeric, increasing_IRF) 
         
+        fit_stdev = np.sqrt(np.diag(fit_covariance))
+
         if make_figures:
             ax = axes[i // num_columns, i % num_columns]
             ax.scatter(x_values_datetime[start_index:end_index], y_subset, label='Signal', color='blue')
@@ -383,14 +387,18 @@ def FitIRFs_DblExp(df, directory, base_name, increasing_IRF, make_figures):
             ax.set_ylabel('Signal')
             ax.legend()
 
-            fit_info = f"A1: {fitted_params[0]:.4f}\nTau1: {fitted_params[1]:.4f}\nA2: {1-fitted_params[0]:.4f}\nTau2: {fitted_params[2]:.4f}"
+            fit_info = (
+                f"A1: {fitted_params[0]:.3f} ± {fit_stdev[0]:.3f}\n"
+                f"Tau1: {fitted_params[1]:.3f} ± {fit_stdev[1]:.3f}\n"
+                f"A2: {1 - fitted_params[0]:.3f} ± {fit_stdev[0]:.3f}\n"
+                f"Tau2: {fitted_params[2]:.3f} ± {fit_stdev[2]:.3f}"
+            )
             ax.text(0.3, 0.5, fit_info, transform=ax.transAxes, bbox=dict(facecolor='white', edgecolor='gray'))
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
 
         # Always add fit info to list for all segments
         if start_index < end_index:  # Ensure there's data in the segment
-            fit_info_list.append([x_values_numeric[start_index], fitted_params[0],fitted_params[1],1-fitted_params[0],fitted_params[2]])
-   
+            fit_info_list.append([x_values_numeric[start_index], fitted_params[0],fit_stdev[0],fitted_params[1],fit_stdev[1],1-fitted_params[0],fit_stdev[0],fitted_params[2],fit_stdev[2]])
 
     if make_figures:
         plt.tight_layout()
@@ -398,30 +406,22 @@ def FitIRFs_DblExp(df, directory, base_name, increasing_IRF, make_figures):
         plt.close(fig)
 
     # Save the fit information as a CSV file
-    fit_info_df = pd.DataFrame(fit_info_list)
+    fit_info_df = pd.DataFrame(fit_info_list[1:], columns=fit_info_list[0])
     fit_info_df.to_csv(os.path.join(directory, f'{base_name}_IRF.csv'), index=False)    
 
-    return pd.read_csv(os.path.join(directory, f'{base_name}_IRF.csv'),header=1)
+    return pd.read_csv(os.path.join(directory, f'{base_name}_IRF.csv'))
 
 
 
 def HV_Deconvolve(df_data, df_IRF, directory, base_name, NIter): 
     """Performs iterative deconvolution on signal using provided IRF
 
-    Parameters:
-    wX (np.ndarray): Array of time values corresponding to wY
-    wY (np.ndarray): Array of signal values to be deconvovled
-    df_IRF (pd.DataFrame): IRF fit result dataframe
-    directory (str): Base directory path where output files will be stored
-    basename (str): base name for file outputs
-    NIter (int): Number of iterations to perform in deconvolution process
-    
     Returns:
     np.ndarray: Array containing deconvolved signal
 
     """    
     # Convert time values to Unix timestamps
-    wX = [pd.Timestamp(dt64).timestamp() for dt64 in df_data['time'].values] 
+    wX = scrub_time(df_data['time'].values)
     wY = df_data['signal'].values
 
     ForceIterations = 1 if NIter != 0 else 0
@@ -502,7 +502,7 @@ def HV_Convolve_chunk(wX, wY, A1, A2, Tau1, Tau2, wConv, start, end):
         num_steps = int(10 * max_tau / spacing)
         wX_kernel = np.linspace(0, 10 * max_tau, num_steps)
         wKernel = (A1_i / Tau1_i) * np.exp(-wX_kernel / Tau1_i) + (A2_i / Tau2_i) * np.exp(-wX_kernel / Tau2_i)
-        wKernel /= np.sum(wKernel)/spacing
+        wKernel /= np.sum(wKernel)#/spacing
         wKernel = np.ascontiguousarray(np.flip(wKernel))
 
         # Pad wY_i manually if necessary
@@ -679,3 +679,13 @@ def HV_average_background( wX, processed_wY, processed_background_key):
         background_averages.append(segment_average)
         
     return background_averages, background_average_times
+
+
+def scrub_time(wT):
+    # Ensure wT is a numpy array
+    wT = np.asarray(wT)
+    
+    # Calculate the time difference from the first timestamp in seconds
+    scrubbed_time = (wT - wT[0]).astype('timedelta64[ms]').astype(float) / 1000.0
+    
+    return scrubbed_time
