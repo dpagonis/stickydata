@@ -169,7 +169,7 @@ def Deconvolve_DblExp_VariableIRF(df, directory, base_name, NIter=0, increasing_
     df (pd.DataFrame): DataFrame containing all original data. Columns: 
         'time' : datetime objects, evenly spaced
         'signal' : signal to be deconvolved
-        'IRF_key' : 1/0 flag where 1 indicates the time periods to be used for fitting IRF
+        'IRF_key' : 1/0 flag where 1 indicates the time periods to be used for fitting IRF. For many users this is time periods where the instrument is zeroed (same as bg_keybg_key)
         Optional:
             'IRF_data' : for cases where IRF is fitted to a different time series than 'signal' (e.g. isotopically labeled calibrant)
             'bg_key' : 1/0 flag indicating measurements of instrument background 
@@ -343,8 +343,14 @@ def FitIRFs_DblExp(df, directory, base_name, increasing_IRF, make_figures):
     # Extract necessary data from the dataframe
     x_values_datetime = df['time'].values 
     x_values_numeric = scrub_time(x_values_datetime)
+
+    if np.issubdtype(x_values_datetime[0], np.number):
+        x_values_datetime=x_values_numeric 
+
     y_values = df['IRF_data'].values
     IRF_key = df['IRF_key'].values
+
+    IRF_key = np.where(IRF_key == 1, 1, 0)
 
     #track down all the periods where we need to fit an IRF
     intervals = []
@@ -498,7 +504,9 @@ def HV_Convolve_chunk(wX, wY, A1, A2, Tau1, Tau2, wConv, start, end):
 
         # Create the kernel
         max_tau = max(Tau1_i, Tau2_i)
-        spacing = wX[1] - wX[0]  # assuming wX is evenly spaced
+        spacing = np.nanmean(wX[1:]-wX[0:-1])
+        if spacing <= 0 or ~np.isfinite(spacing):
+            raise ValueError(f"HV_Convolve_chunk calculated a time point spacing of {spacing}. Expected a finite positive value.")
         num_steps = int(10 * max_tau / spacing)
         wX_kernel = np.linspace(0, 10 * max_tau, num_steps)
         wKernel = (A1_i / Tau1_i) * np.exp(-wX_kernel / Tau1_i) + (A2_i / Tau2_i) * np.exp(-wX_kernel / Tau2_i)
@@ -684,8 +692,12 @@ def HV_average_background( wX, processed_wY, processed_background_key):
 def scrub_time(wT):
     # Ensure wT is a numpy array
     wT = np.asarray(wT)
-    
-    # Calculate the time difference from the first timestamp in seconds
-    scrubbed_time = (wT - wT[0]).astype('timedelta64[ms]').astype(float) / 1000.0
-    
+
+    # Handle numeric time arrays (float/int-like) and datetime-like arrays.
+    if np.issubdtype(wT.dtype, np.number):
+        scrubbed_time = wT - wT[0]
+    else:
+        # Calculate the time difference from the first timestamp in seconds
+        scrubbed_time = (wT - wT[0]).astype('timedelta64[ms]').astype(float) / 1000.0
+
     return scrubbed_time
